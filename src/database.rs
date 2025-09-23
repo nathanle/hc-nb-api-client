@@ -35,6 +35,14 @@ pub struct NodeBalancerListObject {
 }
 
 #[derive(serde::Deserialize, Serialize, Debug)]
+pub struct LocalNodeBalancerListObject {
+    pub nb_id: i32,
+    pub ipv4: String,
+    pub region: String,
+    pub lke_id: i32,
+}
+
+#[derive(serde::Deserialize, Serialize, Debug)]
 pub struct NodeObject {
     address: String,
     config_id: i32,
@@ -184,17 +192,17 @@ pub async fn localdb_init() -> Result<(), Box<dyn std::error::Error>> {
 
 }
 
-pub async fn update_db_nb(nodebalancers: NodeBalancerListObject) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn update_db_nb(nodebalancers: LocalNodeBalancerListObject) -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = create_localdb_client().await;
     //println!("{:#?}", nodebalancers);
 
     let update = connection.execute(
             "INSERT INTO nodebalancer (nb_id, ipv4, region, lke_id) VALUES ($1, $2, $3, $4)",
-            &[&nodebalancers.id, &nodebalancers.ipv4, &nodebalancers.region, &nodebalancers.lke_cluster.unwrap_or_default().id],
+            &[&nodebalancers.nb_id, &nodebalancers.ipv4, &nodebalancers.region, &nodebalancers.lke_id],
     ).await;
 
     match update {
-        Ok(success) => println!("NB Row updated."),
+        Ok(success) => (),
         Err(e) => {
             if e.to_string().contains("duplicate key value violates unique constraint") {
                 ();
@@ -219,9 +227,9 @@ pub async fn get_nb_ids() -> Result<Vec<Row>, Error> {
 }
 
 pub async fn get_nb_by_loc(loc: String) -> Result<Vec<Row>, Error> {
-    let mut node_connection = create_localdb_client().await;
+    let mut node_connection = create_maindb_client().await;
     let nb_table = node_connection.query(
-        "SELECT nb_id FROM nodebalancer where region like '%$1'", &[&loc],
+        "SELECT * FROM nodebalancer where region = $1", &[&loc],
     ).await;
 
     Ok(nb_table?)

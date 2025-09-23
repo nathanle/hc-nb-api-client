@@ -1,4 +1,8 @@
 use serde_json;
+use futures::future::join_all;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tokio::task;
 use serde::{Serialize};
 use clap::Parser;
 use rust_decimal::prelude::*;
@@ -13,9 +17,11 @@ use crate::database::{
     localdb_init,
     get_nb_ids,
     get_nbcfg_ids,
+    get_nb_by_loc,
     update_db_node,
     update_db_nb,
     update_db_config,
+    LocalNodeBalancerListObject,
     NodeBalancerListObject,
     NodeBalancerConfigObject,
     NodeObject
@@ -29,9 +35,6 @@ static api_version: LazyLock<String> = LazyLock::new(|| {
 });
 static token: LazyLock<String> = LazyLock::new(|| {
     env::var("TOKEN").expect("TOKEN not set!")
-});
-static region: LazyLock<String> = LazyLock::new(|| {
-    env::var("REGION").expect("REGION not set!")
 });
 
 #[derive(Parser, Debug)]
@@ -87,8 +90,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .default_headers(headers)
         .build()?;
 
-    let nb_ids = get_nb_ids().await;
-    for n in nb_ids.unwrap() {
+    let loc = env::var("LOCATION").expect("LOCATION not set!");
+    let mut connection = create_maindb_client().await;
+    let nb_ids = get_nb_by_loc(loc.to_string()).await;
+    let unwraped_nb_ids = nb_ids.unwrap();
+    let sem = Arc::new(Semaphore::new(100));
+    println!("Processing NBs");
+    for x in unwraped_nb_ids.clone() {
+        let nbid: i32 = x.get(0);
+        let ipv4: String = x.get(1);
+        let region: String = x.get(2);
+        let lke_id: i32 = x.get(3);
+        let nb_payload = LocalNodeBalancerListObject {
+            nb_id: nbid,
+            ipv4: ipv4,
+            region: region,
+            lke_id: lke_id,
+        };
+        let permit = Arc::clone(&sem).acquire_owned().await;
+        task::spawn(async move {
+            let _permit = permit;
+            let _ = update_db_nb(nb_payload).await;
+        });
+        //let _ = tokio::spawn(
+        //    async move {
+        //        let _ = update_db_nb(nb_payload).await;
+        //    }
+        //);
+    }
+
+    println!("Processing configs");
+    for n in unwraped_nb_ids {
         let nbid: i32 = n.get(0);
         let config_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs", api_version.to_string(), nbid);
         let config_response = client.get(config_url)
@@ -113,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 let mut page = 1;
+                let cfgsem = Arc::new(Semaphore::new(100));
                 while page <= nbconfigdata.pages {
                     println!("Processing page {}", page);
                     let config_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs?page={}", api_version.to_string(), nbid, &page);
@@ -129,11 +162,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let borrow_configobj = &configobj;
                             let cfgid = borrow_configobj.id;
                             let nbid = borrow_configobj.nodebalancer_id;
-                            let _ = tokio::spawn(
-                                async move {
-                                    let _ = update_db_config(configobj).await;
-                                }
-                            );
+                            let permit = Arc::clone(&cfgsem).acquire_owned().await;
+                            task::spawn(async move {
+                                let _permit = permit;
+                                let _ = update_db_config(configobj).await;
+                            });
+                            //let _ = tokio::spawn(
+                            //    async move {
+                            //        let _ = update_db_config(configobj).await;
+                            //    }
+                            //);
                         }
                     }
                     page += 1;
@@ -142,6 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let nbcfg_ids = get_nbcfg_ids().await;
+    println!("Processing nodes");
     for n in nbcfg_ids.unwrap() {
         let cfgid: i32 = n.get(0);
         let nbid: i32 = n.get(1);
@@ -164,6 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 let mut page = 1;
+                let nodesem = Arc::new(Semaphore::new(200));
                 while page <= nodedata.pages {
                     println!("Processing node page {}", page);
                     let node_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs/{}/nodes", api_version.to_string(), nbid, cfgid);
@@ -176,11 +216,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let nodedata: NodeListData = serde_json::from_value(json.clone()).unwrap();
                         for d in nodedata.data {
                             let nodeobj: database::NodeObject = d;
-                            let _ = tokio::spawn(
-                                async move {
-                                    let _ = update_db_node(nodeobj).await;
-                                }
-                            );
+                            let permit = Arc::clone(&nodesem).acquire_owned().await;
+                            task::spawn(async move {
+                                let _permit = permit;
+                                let _ = update_db_node(nodeobj).await;
+                            });
+                            //let _ = tokio::spawn(
+                            //    async move {
+                            //        let _ = update_db_node(nodeobj).await;
+                            //    }
+                            //);
                         }
                     }
                     page += 1;
