@@ -1,4 +1,6 @@
 use serde_json;
+use serde_json::Value;
+use tokio_postgres::Row;
 use futures::future::join_all;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -76,7 +78,69 @@ fn epoch_to_dt(e: &String) -> String {
 
     newdate.to_string()
 }
+async fn process_nbconfigs_async(nbid: i32) {
+    let auth_header = format!("Bearer {}", token.to_string());
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_header).unwrap());
+    headers.insert("accept", HeaderValue::from_static("application/json"));
 
+    let client = Client::builder()
+        .default_headers(headers)
+        .build();
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    //let nbid: i32 = n.get(0);
+    let config_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs", api_version.to_string(), nbid);
+    let config_response = client.expect("NB Config for nodes failed!").get(config_url)
+        .send()
+        .await;
+}
+
+async fn convert_row(row: Vec<Row>) -> Vec<i32> {
+    let mut values = Vec::new();
+    for i in row {
+        let value: i32 = i.get(0); // Get value by index and unwrap Option
+        values.push(value);
+    }
+    values
+}
+
+async fn process_item_async(item: i32) {
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    println!("{:?}", item);
+    // Simulate some async work
+}
+async fn process_nblistcfg_async(nbid: i32) {
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    println!("{}", nbid);
+    let auth_header = format!("Bearer {}", token.to_string());
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_header).unwrap());
+    headers.insert("accept", HeaderValue::from_static("application/json"));
+    let client = Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap()
+        .clone();
+    let config_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs", api_version.to_string(), nbid);
+    let config_response = client.get(config_url)
+        .send()
+        .await;
+
+    let json: serde_json::Value = config_response.expect("REASON").json().await.expect("REASON");
+    let nbconfigdata: NodeBalancerConfigData = serde_json::from_value(json.clone()).unwrap();
+
+    for d in nbconfigdata.data {
+        let configobj: database::NodeBalancerConfigObject = d;
+        let borrow_configobj = &configobj;
+        let cfgid = borrow_configobj.id;
+        let nbid = borrow_configobj.nodebalancer_id;
+        let _ = tokio::spawn(
+            async move {
+                let _ = update_db_config(configobj).await;
+            }
+        );
+    }
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = localdb_init().await;
@@ -111,6 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         task::spawn(async move {
             let _permit = permit;
             let _ = update_db_nb(nb_payload).await;
+            //tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         });
         //let _ = tokio::spawn(
         //    async move {
@@ -119,120 +184,111 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         //);
     }
 
-    println!("Processing configs");
-    for n in unwraped_nb_ids {
-        let nbid: i32 = n.get(0);
-        let config_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs", api_version.to_string(), nbid);
-        let config_response = client.get(config_url)
-            .send()
-            .await?;
 
-        if config_response.status().is_success() {
-            let json: serde_json::Value = config_response.json().await?;
-            let nbconfigdata: NodeBalancerConfigData = serde_json::from_value(json.clone()).unwrap();
-
-            if nbconfigdata.pages == 1 {
-                for d in nbconfigdata.data {
-                    let configobj: database::NodeBalancerConfigObject = d;
-                    let borrow_configobj = &configobj;
-                    let cfgid = borrow_configobj.id;
-                    let nbid = borrow_configobj.nodebalancer_id;
-                    let _ = tokio::spawn(
-                        async move {
-                            let _ = update_db_config(configobj).await;
-                        }
-                    );
-                }
-            } else {
-                let mut page = 1;
-                let cfgsem = Arc::new(Semaphore::new(100));
-                while page <= nbconfigdata.pages {
-                    println!("Processing page {}", page);
-                    let config_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs?page={}", api_version.to_string(), nbid, &page);
-
-                    let config_response = client.get(config_url)
-                        .send()
-                        .await?;
-
-                    if config_response.status().is_success() {
-                        let json: serde_json::Value = config_response.json().await?;
-                        let nbconfigdata: NodeBalancerConfigData = serde_json::from_value(json.clone()).unwrap();
-                        for d in nbconfigdata.data {
-                            let configobj: database::NodeBalancerConfigObject = d;
-                            let borrow_configobj = &configobj;
-                            let cfgid = borrow_configobj.id;
-                            let nbid = borrow_configobj.nodebalancer_id;
-                            let permit = Arc::clone(&cfgsem).acquire_owned().await;
-                            task::spawn(async move {
-                                let _permit = permit;
-                                let _ = update_db_config(configobj).await;
-                            });
-                            //let _ = tokio::spawn(
-                            //    async move {
-                            //        let _ = update_db_config(configobj).await;
-                            //    }
-                            //);
-                        }
-                    }
-                    page += 1;
-                }
-            }
+    let v = convert_row(unwraped_nb_ids).await;
+    let cfgsem = Arc::new(Semaphore::new(100));
+    //let permit = Arc::clone(&cfgsem).acquire_owned().await;
+    let permit = Arc::clone(&cfgsem);
+    //println!("{:?}", v);
+    let futures: Vec<_> = v 
+    .into_iter()
+    .map(|item| {
+        let value = permit.clone();
+        async move {
+        let _permit = value;
+        process_nblistcfg_async(item).await;
+        //println!("Processed item with join_all: {}", item);
         }
-    }
-    let nbcfg_ids = get_nbcfg_ids().await;
-    println!("Processing nodes");
-    for n in nbcfg_ids.unwrap() {
-        let cfgid: i32 = n.get(0);
-        let nbid: i32 = n.get(1);
-        let node_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs/{}/nodes", api_version.to_string(), nbid, cfgid);
-        let node_response = client.get(node_url)
-            .send()
-            .await?;
+    })
+    .collect();
+    join_all(futures).await;
+    
+    //for n in unwraped_nb_ids {
+    //    let nbid: i32 = n.get(0);
+    //    let config_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs", api_version.to_string(), nbid);
+    //    let config_response = client.get(config_url)
+    //        .send()
+    //        .await?;
+//
+ //       if config_response.status().is_success() {
+ //           let json: serde_json::Value = config_response.json().await?;
+ //           let nbconfigdata: NodeBalancerConfigData = serde_json::from_value(json.clone()).unwrap();
+//
+ //           if nbconfigdata.pages == 1 {
+  //              for d in nbconfigdata.data {
+   //                 let configobj: database::NodeBalancerConfigObject = d;
+    //                let borrow_configobj = &configobj;
+     //               let cfgid = borrow_configobj.id;
+      //              let nbid = borrow_configobj.nodebalancer_id;
+       //             let _ = tokio::spawn(
+       //                 async move {
+       //                     let _ = update_db_config(configobj).await;
+     //                   }
+     //               );
+     //           }
+    //        } else {
+    //            let mut page = 1;
+    //            let cfgsem = Arc::new(Semaphore::new(100));
+    //            while page <= nbconfigdata.pages {
+    //                println!("Processing page {}", page);
+    //                let config_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs?page={}", api_version.to_string(), nbid, &page);
 
-        if node_response.status().is_success() {
-            let json: serde_json::Value = node_response.json().await?;
-            let nodedata: NodeListData = serde_json::from_value(json.clone()).unwrap();
-            if nodedata.pages == 1 {
-                for d in nodedata.data {
-                    let nodeobj: database::NodeObject = d;
-                    let _ = tokio::spawn(
-                        async move {
-                            let _ = update_db_node(nodeobj).await;
-                        }
-                    );
-                }
-            } else {
-                let mut page = 1;
-                let nodesem = Arc::new(Semaphore::new(200));
-                while page <= nodedata.pages {
-                    println!("Processing node page {}", page);
-                    let node_url = format!("https://api.linode.com/{}/nodebalancers/{}/configs/{}/nodes", api_version.to_string(), nbid, cfgid);
-                    let node_response = client.get(node_url)
-                        .send()
-                        .await?;
+    //                let config_response = client.get(config_url)
+    //                    .send()
+    //                    .await?;
 
-                    if node_response.status().is_success() {
-                        let json: serde_json::Value = node_response.json().await?;
-                        let nodedata: NodeListData = serde_json::from_value(json.clone()).unwrap();
-                        for d in nodedata.data {
-                            let nodeobj: database::NodeObject = d;
-                            let permit = Arc::clone(&nodesem).acquire_owned().await;
-                            task::spawn(async move {
-                                let _permit = permit;
-                                let _ = update_db_node(nodeobj).await;
-                            });
-                            //let _ = tokio::spawn(
-                            //    async move {
-                            //        let _ = update_db_node(nodeobj).await;
-                            //    }
-                            //);
-                        }
-                    }
-                    page += 1;
-                }
-            }
-        }
-    }
+    //                if config_response.status().is_success() {
+    //                    let json: serde_json::Value = config_response.json().await?;
+    //                    let nbconfigdata: NodeBalancerConfigData = serde_json::from_value(json.clone()).unwrap();
+    //                    for d in nbconfigdata.data {
+    //                        let configobj: database::NodeBalancerConfigObject = d;
+    //                        let borrow_configobj = &configobj;
+    //                        let cfgid = borrow_configobj.id;
+    //                        let nbid = borrow_configobj.nodebalancer_id;
+     //                       let permit = Arc::clone(&cfgsem).acquire_owned().await;
+     //                       task::spawn(async move {
+    //                            let _permit = permit;
+    //                            let _ = update_db_config(configobj).await;
+    //                        });
+    //                        //let _ = tokio::spawn(
+    //                        //    async move {
+    //                        //        let _ = update_db_config(configobj).await;
+    //                        //    }
+    //                        //);
+    //                    }
+    //                }
+    //                page += 1;
+    //            }
+    //        }
+    //    }
+    //}
+    //
+    //let nbcfg_ids = get_nbcfg_ids().await;
+    //println!("Processing nodes");
+
+    //let v = convert_row(nbcfg_ids.unwrap()).await;
+    //println!("{:?}", v);
+    //let futures: Vec<_> = v 
+    //.into_iter()
+    //.map(|item| async move {
+    //    process_item_async(item).await;
+    //    println!("Processed item with join_all: {}", item);
+    //})
+    //.collect();
+// Await all futures to complete
+    //join_all(futures).await;
+    //
+    //let futures: Vec<i32> = v 
+    //    .into_iter()
+    //    .map(|item| async move {
+    //        process_nbconfigs_async(item).await;
+    //    })
+    //    .collect();
+
+    // Await all futures to complete
+    //join_all(futures).await;
+    //println!("{:#?}", futures); 
+
 
     if args.data {
         let mut connection = create_localdb_client().await;
