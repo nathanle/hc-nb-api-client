@@ -143,11 +143,11 @@ pub async fn localdb_init() -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = create_localdb_client().await;
     let main_table = connection.batch_execute("
         CREATE TABLE IF NOT EXISTS nodebalancer (
-            nb_id INTEGER NOT NULL,
+            id INTEGER NOT NULL,
             ipv4 VARCHAR NOT NULL,
             region VARCHAR NOT NULL,
             lke_id INTEGER,
-            PRIMARY KEY (nb_id)
+            PRIMARY KEY (id)
             );
     ");
 
@@ -188,7 +188,47 @@ pub async fn localdb_init() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => println!("{:?}", e),
         }
 
+
+    let state_table  = connection.batch_execute("
+        CREATE TABLE IF NOT EXISTS state  (
+            id SERIAL PRIMARY KEY,
+            nodebalancer_id INTEGER NOT NULL REFERENCES nodebalancer,
+            nodebalancer_config_id INTEGER NOT NULL,
+            node_id INTEGER NOT NULL,
+            port INTEGER NOT NULL,
+            lastmode VARCHAR,
+            current VARCHAR
+            );
+    ");
+    match state_table.await {
+        Ok(success) => println!("State table available"),
+        Err(e) => println!("{:?}", e),
+        }
+
     Ok(())
+
+}
+
+pub async fn update_state(nbid: i32, nbcfgid: i32, nodeid: i32, port: i32, lastmode: String, current: String) -> Result<(), Box<dyn std::error::Error>> {
+    let mut connection = create_localdb_client().await;
+    let update = connection.execute(
+            "INSERT INTO state (nodebalancerid, nodebalancer_config_id, node_id, port, lastmode, current) VALUES ($1, $2, $3, $4, $5, $6)",
+            &[&nbid, &nbcfgid, &nodeid, &port, &lastmode.to_string(), &current.to_string()],
+    ).await;
+
+    match update {
+        Ok(success) => (),
+        Err(e) => {
+            if e.to_string().contains("duplicate key value violates unique constraint") {
+                ();
+            } else {
+                println!("{:?}", e);
+            }
+        }
+    }
+
+    Ok(())
+
 
 }
 
@@ -197,7 +237,7 @@ pub async fn update_db_nb(nodebalancers: LocalNodeBalancerListObject) -> Result<
     //println!("{:#?}", nodebalancers);
 
     let update = connection.execute(
-            "INSERT INTO nodebalancer (nb_id, ipv4, region, lke_id) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO nodebalancer (id, ipv4, region, lke_id) VALUES ($1, $2, $3, $4)",
             &[&nodebalancers.nb_id, &nodebalancers.ipv4, &nodebalancers.region, &nodebalancers.lke_id],
     ).await;
 
@@ -219,7 +259,7 @@ pub async fn update_db_nb(nodebalancers: LocalNodeBalancerListObject) -> Result<
 pub async fn get_nb_ids() -> Result<Vec<Row>, Error> {
     let mut node_connection = create_localdb_client().await;
     let nb_table = node_connection.query(
-        "SELECT nb_id FROM nodebalancer", &[],
+        "SELECT id FROM nodebalancer", &[],
     ).await;
 
     Ok(nb_table?)
@@ -259,7 +299,7 @@ pub async fn get_by_node_ip_nbcfg(ip: String) -> Result<Vec<Row>, Error> {
 pub async fn get_by_node_ip_nb(ip: String) -> Result<Vec<Row>, Error> {
     let mut node_connection = create_localdb_client().await;
     let nb_table = node_connection.query(
-        "select * from node INNER JOIN nodebalancer ON node.nodebalancer_id = nodebalancer.nb_id where address like '%$1%';", &[&ip],
+        "select * from node INNER JOIN nodebalancer ON node.nodebalancer_id = nodebalancer.id where address like '%$1%';", &[&ip],
     ).await;
 
     Ok(nb_table?)
