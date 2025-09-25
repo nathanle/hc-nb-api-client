@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hc-nb-client 
+  name: health-check
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hc-nb-client 
+  template:
+    metadata:
+      labels:
+        app: hc-nb-client 
+    spec:
+      serviceAccountName: node-health-check-operator-rs-account
+      imagePullSecrets:
+      - name: ghcr-login-secret
+      containers:
+      - name: hc-nb-client 
+          image: nathanles/hc-nb-api-client:latest
+        envFrom:
+        - secretRef:
+            name: hc-client-secrets
+        resources:
+          requests:
+            memory: "10Mi"
+            cpu: "10m"
+          limits:
+            memory: "20Mi"
+            cpu: "100m"
+        imagePullPolicy: IfNotPresent 
